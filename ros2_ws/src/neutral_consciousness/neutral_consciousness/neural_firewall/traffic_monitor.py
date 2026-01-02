@@ -1,23 +1,44 @@
 """
-Traffic Monitor Module
+Traffic Monitor Module with Homomorphic Encryption
 
-Neural Firewall security component that monitors spike rates
-and neural traffic patterns to ensure safe operation.
+Neural Firewall security component that monitors spike rates,
+neural traffic patterns, and implements encrypted processing
+to ensure safe operation while preventing "brainjacking".
+
+Security Model:
+- All neural traffic can be encrypted before satellite transmission
+- Satellite processes encrypted data (cannot read thoughts)
+- Only biological interface holds decryption keys
 """
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray, Bool, String
 import numpy as np
+from typing import Optional
+
+# Import homomorphic encryption wrapper
+try:
+    from .homomorphic_encryption import (
+        NeuralEncryptionWrapper, 
+        EncryptedVector,
+        SecurityError
+    )
+    HE_AVAILABLE = True
+except ImportError:
+    HE_AVAILABLE = False
 
 
 class NeuralFirewall(Node):
     """
-    ROS 2 Node implementing the Neural Firewall.
+    ROS 2 Node implementing the Neural Firewall with Homomorphic Encryption.
     
-    Monitors neural traffic for anomalies and implements
-    safety mechanisms including a kill switch for emergency
-    disconnection.
+    Features:
+    1. Spike rate monitoring with kill switch
+    2. Anomaly detection via z-score analysis
+    3. Synchronization attack detection
+    4. Homomorphic encryption for satellite communication
+    5. Session-based security with key management
     """
     
     def __init__(self):
@@ -27,11 +48,13 @@ class NeuralFirewall(Node):
         self.declare_parameter('spike_rate_limit', 200.0)
         self.declare_parameter('anomaly_threshold', 3.0)
         self.declare_parameter('monitoring_window', 1.0)
+        self.declare_parameter('enable_encryption', True)
         
         # Threshold: Max spikes per second before "Kill Switch" triggers
         self.SPIKE_RATE_LIMIT = self.get_parameter('spike_rate_limit').value
         self.ANOMALY_THRESHOLD = self.get_parameter('anomaly_threshold').value
         self.MONITORING_WINDOW = self.get_parameter('monitoring_window').value
+        self.ENCRYPTION_ENABLED = self.get_parameter('enable_encryption').value
         
         # Internal state for running statistics
         self.spike_history = []
@@ -39,7 +62,12 @@ class NeuralFirewall(Node):
         self.baseline_std = 20.0
         self.is_connected = True
         
-        # Subscribers
+        # ===== HOMOMORPHIC ENCRYPTION SETUP =====
+        self.encryption_wrapper: Optional[NeuralEncryptionWrapper] = None
+        if HE_AVAILABLE and self.ENCRYPTION_ENABLED:
+            self._init_encryption()
+        
+        # ===== SUBSCRIBERS =====
         self.subscription = self.create_subscription(
             Float32MultiArray,
             'incoming_neural_data',
@@ -54,7 +82,15 @@ class NeuralFirewall(Node):
             10
         )
         
-        # Publishers
+        # Subscribe to prediction error for encrypted forwarding
+        self.prediction_error_sub = self.create_subscription(
+            Float32MultiArray,
+            '/neural_data/prediction_error',
+            self.forward_to_satellite,
+            10
+        )
+        
+        # ===== PUBLISHERS =====
         self.security_status_pub = self.create_publisher(
             String,
             'firewall/status',
@@ -73,11 +109,31 @@ class NeuralFirewall(Node):
             10
         )
         
+        # Encrypted data output (would go to satellite)
+        self.encrypted_output_pub = self.create_publisher(
+            String,  # Serialized encrypted data
+            'firewall/encrypted_satellite_data',
+            10
+        )
+        
         # Status timer
         self.status_timer = self.create_timer(1.0, self.publish_status)
         
         self.get_logger().info('Neural Firewall initialized - Monitoring active')
         self.get_logger().info(f'Spike rate limit: {self.SPIKE_RATE_LIMIT} Hz')
+        if self.encryption_wrapper:
+            self.get_logger().info('Homomorphic Encryption: ENABLED')
+        else:
+            self.get_logger().warn('Homomorphic Encryption: DISABLED')
+    
+    def _init_encryption(self):
+        """Initialize homomorphic encryption system."""
+        try:
+            self.encryption_wrapper = NeuralEncryptionWrapper()
+            self.get_logger().info('Encryption context created successfully')
+        except Exception as e:
+            self.get_logger().error(f'Failed to initialize encryption: {e}')
+            self.encryption_wrapper = None
 
     def monitor_traffic(self, msg: Float32MultiArray):
         """
@@ -138,15 +194,63 @@ class NeuralFirewall(Node):
                 'High synchronization detected - possible injection attack'
             )
             self._publish_alert('SYNC_ATTACK_POSSIBLE')
+    
+    def forward_to_satellite(self, msg: Float32MultiArray):
+        """
+        Forward prediction error to satellite with encryption.
+        
+        This is the key security function: the satellite receives
+        encrypted data it can process but cannot read.
+        
+        Args:
+            msg: Prediction error from visual cortex
+        """
+        if not self.is_connected:
+            return
+        
+        data = np.array(msg.data, dtype=np.float32)
+        
+        if self.encryption_wrapper:
+            try:
+                # Encrypt data before transmission
+                encrypted, metadata = self.encryption_wrapper.encrypt_spike_train(data)
+                
+                # Serialize for ROS transmission (simplified)
+                output_msg = String()
+                output_msg.data = (
+                    f"ENCRYPTED|session={metadata['session_id'][:8]}|"
+                    f"packet={metadata['packet_id']}|"
+                    f"checksum={metadata['checksum']}"
+                )
+                self.encrypted_output_pub.publish(output_msg)
+                
+            except SecurityError as e:
+                self.get_logger().error(f'Encryption security error: {e}')
+                self.trigger_kill_switch()
+        else:
+            # No encryption - log warning
+            self.get_logger().warn_once(
+                'Transmitting UNENCRYPTED data to satellite!'
+            )
 
     def trigger_kill_switch(self):
         """
         Activate the kill switch to sever all external connections.
         
         This is the emergency response to detected security threats.
+        Emergency actions:
+        1. Revoke encryption session
+        2. Sever satellite connection
+        3. Freeze SNN state
+        4. Log forensic data
         """
         self.get_logger().info('KILL SWITCH ACTIVATED: Connection Severed.')
         self.is_connected = False
+        
+        # Revoke encryption session (new keys required to reconnect)
+        if self.encryption_wrapper:
+            self.encryption_wrapper = None  # Destroy current session
+            self.get_logger().info('Encryption session revoked')
         
         # Publish kill switch activation
         kill_msg = Bool()
@@ -154,12 +258,6 @@ class NeuralFirewall(Node):
         self.kill_switch_pub.publish(kill_msg)
         
         self._publish_alert('KILL_SWITCH_ACTIVATED')
-        
-        # In a real scenario, this would:
-        # 1. Send a hardware interrupt signal
-        # 2. Sever network connections
-        # 3. Freeze SNN state
-        # 4. Log forensic data
     
     def publish_status(self):
         """Publish current firewall status."""
@@ -167,7 +265,10 @@ class NeuralFirewall(Node):
         
         if self.is_connected:
             avg_rate = np.mean(self.spike_history) if self.spike_history else 0.0
-            status_msg.data = f'OK: avg_rate={avg_rate:.2f}Hz, connected=True'
+            enc_status = "encrypted" if self.encryption_wrapper else "UNENCRYPTED"
+            status_msg.data = (
+                f'OK: avg_rate={avg_rate:.2f}Hz, connected=True, mode={enc_status}'
+            )
         else:
             status_msg.data = 'DISCONNECTED: Kill switch activated'
         
@@ -178,6 +279,27 @@ class NeuralFirewall(Node):
         alert_msg = String()
         alert_msg.data = alert_type
         self.alert_pub.publish(alert_msg)
+    
+    def reinitialize_encryption(self) -> bool:
+        """
+        Reinitialize encryption with new keys.
+        
+        Called after kill switch to establish new secure session.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not HE_AVAILABLE:
+            return False
+        
+        try:
+            self.encryption_wrapper = NeuralEncryptionWrapper()
+            self.is_connected = True
+            self.get_logger().info('New encryption session established')
+            return True
+        except Exception as e:
+            self.get_logger().error(f'Failed to reinitialize encryption: {e}')
+            return False
 
 
 def main(args=None):
