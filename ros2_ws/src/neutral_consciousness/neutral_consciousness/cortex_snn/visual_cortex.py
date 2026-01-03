@@ -9,12 +9,13 @@ SCIENTIFIC VALIDATION:
 - Architecture: 1000 LIF Neurons (Cortex) + 500 LIF Neurons (Error)
 - Logic: Predictive Coding (Error = Input - Prediction)
 - Learning: PES (Prescribed Error Sensitivity) Rule
+- Metrics: Euclidean Distance & Synchronization Health
 """
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Float32
 import numpy as np
 
 try:
@@ -44,6 +45,13 @@ class VisualCortexNode(Node):
         self.error_pub = self.create_publisher(
             Float32MultiArray,
             '/neural_data/prediction_error',
+            10
+        )
+        
+        # Health Publisher
+        self.health_pub = self.create_publisher(
+            Float32,
+            '/synchronization_health',
             10
         )
 
@@ -93,7 +101,7 @@ class VisualCortexNode(Node):
             conn = nengo.Connection(self.error_units, self.cortex, transform=0.1)
             conn.learning_rule_type = nengo.PES() # Prescribed Error Sensitivity rule
             
-            # Probe for outputting error signal to ROS
+            # Probes
             self.error_probe = nengo.Probe(self.error_units, synapse=0.01)
 
         # 2. Setup the Simulator
@@ -105,8 +113,6 @@ class VisualCortexNode(Node):
         if len(msg.data) > 0:
             arr = np.frombuffer(msg.data, dtype=np.uint8)
             # Resize logic similar to previous implementation for consistency
-            # Assuming we need to flatten to self.INPUT_DIM (64)
-            # Just taking a slice for efficiency in this demo
             flat = arr.flatten().astype(np.float32) / 255.0
             if len(flat) >= self.INPUT_DIM:
                 self.current_input = flat[:self.INPUT_DIM]
@@ -118,14 +124,29 @@ class VisualCortexNode(Node):
         if NENGO_AVAILABLE:
             self.sim.step()
             
-            # Publish error signal
-            # We take the latest probed value
             if self.sim.data[self.error_probe].shape[0] > 0:
                 current_error = self.sim.data[self.error_probe][-1]
                 
+                # Publish Error
                 msg = Float32MultiArray()
                 msg.data = current_error.tolist()
                 self.error_pub.publish(msg)
+                
+                # Calculate Synchronization Health
+                # Euclidean distance of the error vector
+                error_magnitude = np.linalg.norm(current_error)
+                input_magnitude = np.linalg.norm(self.current_input)
+                
+                # Health = 1.0 - Relative Error (Clamped at 0)
+                # Avoid divide by zero
+                denom = input_magnitude if input_magnitude > 1e-6 else 1.0
+                rel_error = error_magnitude / denom
+                health = max(0.0, 1.0 - rel_error)
+                
+                # Publish Health
+                health_msg = Float32()
+                health_msg.data = float(health)
+                self.health_pub.publish(health_msg)
 
 def main(args=None):
     rclpy.init(args=args)

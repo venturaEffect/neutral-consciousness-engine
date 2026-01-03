@@ -26,6 +26,8 @@ setup(
             'cortex_node = neutral_consciousness.cortex_snn.visual_cortex:main',
             'firewall_node = neutral_consciousness.neural_firewall.traffic_monitor:main',
             'dream_node = neutral_consciousness.cortex_snn.dream_engine:main',
+            'split_brain_node = neutral_consciousness.tests.split_brain_test:main',
+            'latency_injector_node = neutral_consciousness.neural_firewall.latency_injector:main',
         ],
     },
 )
